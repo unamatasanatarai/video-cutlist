@@ -1,0 +1,8 @@
+{
+  "output": "hrwind.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "hrwind",
+    "../clips/b.mp4"
+  ]
+}

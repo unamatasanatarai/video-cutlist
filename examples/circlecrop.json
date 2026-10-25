@@ -1,0 +1,8 @@
+{
+  "output": "circlecrop.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "circlecrop",
+    "../clips/b.mp4"
+  ]
+}

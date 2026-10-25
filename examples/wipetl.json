@@ -1,0 +1,8 @@
+{
+  "output": "wipetl.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "wipetl",
+    "../clips/b.mp4"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "output": "revealright.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "revealright",
+    "../clips/b.mp4"
+  ]
+}

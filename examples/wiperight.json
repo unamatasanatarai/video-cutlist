@@ -1,0 +1,8 @@
+{
+  "output": "wiperight.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "wiperight",
+    "../clips/b.mp4"
+  ]
+}

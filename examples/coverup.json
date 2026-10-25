@@ -1,0 +1,8 @@
+{
+  "output": "coverup.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "coverup",
+    "../clips/b.mp4"
+  ]
+}

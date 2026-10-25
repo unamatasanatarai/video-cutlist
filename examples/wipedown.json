@@ -1,0 +1,8 @@
+{
+  "output": "wipedown.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "wipedown",
+    "../clips/b.mp4"
+  ]
+}

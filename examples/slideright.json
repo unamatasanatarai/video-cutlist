@@ -1,0 +1,8 @@
+{
+  "output": "slideright.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "slideright",
+    "../clips/b.mp4"
+  ]
+}

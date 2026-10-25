@@ -1,0 +1,8 @@
+{
+  "output": "pixelize.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "pixelize",
+    "../clips/b.mp4"
+  ]
+}

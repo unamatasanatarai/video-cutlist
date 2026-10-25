@@ -1,0 +1,8 @@
+{
+  "output": "hblur.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "hblur",
+    "../clips/b.mp4"
+  ]
+}

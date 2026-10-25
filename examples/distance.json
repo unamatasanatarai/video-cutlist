@@ -1,0 +1,8 @@
+{
+  "output": "distance.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "distance",
+    "../clips/b.mp4"
+  ]
+}

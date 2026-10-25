@@ -1,0 +1,8 @@
+{
+  "output": "fade.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "fade",
+    "../clips/b.mp4"
+  ]
+}

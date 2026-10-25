@@ -1,0 +1,42 @@
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Editor & IDE artifacts
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+*.bak
+
+# Environment and local configs
+.env
+.env.*
+!.env.example
+
+# Temporary / intermediate files from video processing
+*-p.*
+*.tmp
+*.tmp.*
+
+# Example and local render outputs
+example.mp4
+final.mp4
+render.sh
+
+# Logs and error outputs
+*.log
+*.err
+*.ffmpeg
+
+.agents
+examples/*.mp4

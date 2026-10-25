@@ -1,0 +1,8 @@
+{
+  "output": "hrslice.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "hrslice",
+    "../clips/b.mp4"
+  ]
+}

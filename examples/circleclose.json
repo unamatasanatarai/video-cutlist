@@ -1,0 +1,8 @@
+{
+  "output": "circleclose.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "circleclose",
+    "../clips/b.mp4"
+  ]
+}

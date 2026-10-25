@@ -1,0 +1,8 @@
+{
+  "output": "diagtr.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "diagtr",
+    "../clips/b.mp4"
+  ]
+}

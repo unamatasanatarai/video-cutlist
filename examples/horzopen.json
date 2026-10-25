@@ -1,0 +1,8 @@
+{
+  "output": "horzopen.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "horzopen",
+    "../clips/b.mp4"
+  ]
+}

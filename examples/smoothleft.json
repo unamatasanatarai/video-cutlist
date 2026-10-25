@@ -1,0 +1,8 @@
+{
+  "output": "smoothleft.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "smoothleft",
+    "../clips/b.mp4"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "output": "squeezeh.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "squeezeh",
+    "../clips/b.mp4"
+  ]
+}

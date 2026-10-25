@@ -1,0 +1,8 @@
+{
+  "output": "vuslice.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "vuslice",
+    "../clips/b.mp4"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "output": "radial.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "radial",
+    "../clips/b.mp4"
+  ]
+}

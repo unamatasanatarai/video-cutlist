@@ -1,0 +1,8 @@
+{
+  "output": "vertclose.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "vertclose",
+    "../clips/b.mp4"
+  ]
+}

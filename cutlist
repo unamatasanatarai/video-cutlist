@@ -1,0 +1,1450 @@
+#!/usr/bin/env bash
+
+export LC_ALL=C
+
+readonly transition_list=(
+    'Fades & Blends|fade|crossfade: the clips blend smoothly'
+    'Fades & Blends|fadefast|crossfade on a quick curve'
+    'Fades & Blends|fadeslow|crossfade on a slow curve'
+    'Fades & Blends|fadeblack|fade out to black, then in from black'
+    'Fades & Blends|fadewhite|fade out to white, then in from white'
+    'Fades & Blends|fadegrays|fade through grayscale'
+    'Fades & Blends|dissolve|random-pixel dissolve (grainy noise)'
+    'Fades & Blends|distance|blend driven by colour difference between the clips'
+    'Fades & Blends|pixelize|pixelate the current clip, then sharpen into the next'
+    'Fades & Blends|hblur|horizontal blur across the change'
+    'Fades & Blends|zoomin|zoom into the current clip while fading to the next'
+    'Hard Wipes|wipeleft|hard edge sweeps right to left'
+    'Hard Wipes|wiperight|hard edge sweeps left to right'
+    'Hard Wipes|wipeup|hard edge sweeps bottom to top'
+    'Hard Wipes|wipedown|hard edge sweeps top to bottom'
+    'Hard Wipes|wipetl|corner wipe from bottom-right towards top-left'
+    'Hard Wipes|wipetr|corner wipe from bottom-left towards top-right'
+    'Hard Wipes|wipebl|corner wipe from top-right towards bottom-left'
+    'Hard Wipes|wipebr|corner wipe from top-left towards bottom-right'
+    'Smooth & Diagonal Wipes|smoothleft|soft-edged wipe, right to left'
+    'Smooth & Diagonal Wipes|smoothright|soft-edged wipe, left to right'
+    'Smooth & Diagonal Wipes|smoothup|soft-edged wipe, bottom to top'
+    'Smooth & Diagonal Wipes|smoothdown|soft-edged wipe, top to bottom'
+    'Smooth & Diagonal Wipes|diagtl|soft diagonal wipe from bottom-right towards top-left'
+    'Smooth & Diagonal Wipes|diagtr|soft diagonal wipe from bottom-left towards top-right'
+    'Smooth & Diagonal Wipes|diagbl|soft diagonal wipe from top-right towards bottom-left'
+    'Smooth & Diagonal Wipes|diagbr|soft diagonal wipe from top-left towards bottom-right'
+    'Slides|slideleft|next clip pushes the current one out to the left'
+    'Slides|slideright|next clip pushes the current one out to the right'
+    'Slides|slideup|next clip pushes the current one out the top'
+    'Slides|slidedown|next clip pushes the current one out the bottom'
+    'Covers|coverleft|next clip slides in from the right over the current one'
+    'Covers|coverright|next clip slides in from the left over the current one'
+    'Covers|coverup|next clip slides in from the bottom over the current one'
+    'Covers|coverdown|next clip slides in from the top over the current one'
+    'Reveals|revealleft|current clip slides away left, uncovering the next'
+    'Reveals|revealright|current clip slides away right, uncovering the next'
+    'Reveals|revealup|current clip slides away up, uncovering the next'
+    'Reveals|revealdown|current clip slides away down, uncovering the next'
+    'Shapes & Geometry|circleopen|next clip grows out of a circle in the centre'
+    'Shapes & Geometry|circleclose|current clip shrinks into a closing circle'
+    'Shapes & Geometry|circlecrop|current clip closes to black in a circle, next clip opens out of it'
+    'Shapes & Geometry|rectcrop|current clip closes to black in a rectangle, next clip opens out of it'
+    'Shapes & Geometry|vertopen|next clip opens out from a vertical centre line'
+    'Shapes & Geometry|vertclose|next clip closes in from the left and right edges'
+    'Shapes & Geometry|horzopen|next clip opens out from a horizontal centre line'
+    'Shapes & Geometry|horzclose|next clip closes in from the top and bottom edges'
+    "Shapes & Geometry|radial|clock-hand sweep starting at 12 o'clock"
+    'Shapes & Geometry|squeezeh|current clip squeezes flat towards the horizontal centre line'
+    'Shapes & Geometry|squeezev|current clip squeezes thin towards the vertical centre line'
+    'Slices & Streaks|hlslice|staggered horizontal slices, right to left'
+    'Slices & Streaks|hrslice|staggered horizontal slices, left to right'
+    'Slices & Streaks|vuslice|staggered vertical slices, bottom to top'
+    'Slices & Streaks|vdslice|staggered vertical slices, top to bottom'
+    'Slices & Streaks|hlwind|wind-blown streaks, right to left'
+    'Slices & Streaks|hrwind|wind-blown streaks, left to right'
+    'Slices & Streaks|vuwind|wind-blown streaks, bottom to top'
+    'Slices & Streaks|vdwind|wind-blown streaks, top to bottom'
+)
+
+transitions=()
+for entry in "${transition_list[@]}"; do
+    IFS='|' read -r _cat name _desc <<<"${entry}"
+    transitions+=("${name}")
+done
+readonly transitions
+readonly spec_keys=(sequence output duration size fps audio codec crf preset audio_bitrate)
+
+readonly default_output='combined-video.mp4'
+readonly default_duration='1'
+readonly default_codec='libx265'
+readonly default_crf='23'
+readonly default_preset='slow'
+readonly default_audio_bitrate='128k'
+readonly audio_rate='48000'
+
+readonly probe_entries='format=duration:stream=codec_type,codec_name,profile,width,height,sample_aspect_ratio,pix_fmt,avg_frame_rate,r_frame_rate,time_base,sample_rate,channels,channel_layout,duration'
+readonly video_sig_labels=(codec profile size SAR pix_fmt 'frame rate' timebase)
+readonly audio_sig_labels=('audio codec' 'sample rate' 'channel layout')
+
+errors=()
+
+arg_first="${1-}"
+self_name="${0##*/}"
+
+if [[ "${arg_first}" == "--list-transitions" || "${arg_first}" == "--list" ]]; then
+    current_cat=''
+    for entry in "${transition_list[@]}"; do
+        IFS='|' read -r cat name desc <<<"${entry}"
+        if [[ "${cat}" != "${current_cat}" ]]; then
+            [[ -n "${current_cat}" ]] && printf '\n'
+            printf '%s:\n' "${cat}"
+            current_cat="${cat}"
+        fi
+        printf '  %-12s %s\n' "${name}" "${desc}"
+    done
+    exit 0
+fi
+
+if [[ "${arg_first}" == "-h" || "${arg_first}" == "--help" ]]; then
+    printf 'Usage: %s SPEC.json             print the ffmpeg command for the edit\n' "${self_name}"
+    printf '       %s SPEC.json | bash      print it and run it\n' "${self_name}"
+    printf '       %s --list                transition names with a short description\n' "${self_name}"
+    printf '       %s --help                this help\n\n' "${self_name}"
+    printf 'JSON options (only "sequence" is required; the others fall back to these defaults):\n'
+    printf '  sequence       (required)          clips and transition names in order, e.g.\n'
+    printf '                                     ["a.mp4", "fade", "b.mp4", "c.mp4", "wipeleft:0.5", "d.mp4"]\n'
+    printf '  output         %s  file to create (relative to the JSON file)\n' "${default_output}"
+    printf '  duration       %ss                  transition length in seconds\n' "${default_duration}"
+    printf '  size           first clip'\''s size   picture size, e.g. "1920x1080"\n'
+    printf '  fps            first clip'\''s rate   frames per second, e.g. 30\n'
+    printf '  audio          true                false makes a silent video\n'
+    printf '  codec          %s             libx265 (H.265, smaller) or libx264 (H.264, plays everywhere)\n' "${default_codec}"
+    printf '  crf            %s                  quality: lower = better and bigger (18 near-perfect, 28 small)\n' "${default_crf}"
+    printf '  preset         %s                encoding speed: ultrafast ... veryslow (slower = smaller file)\n' "${default_preset}"
+    printf '  audio_bitrate  %s                sound quality: 96k speech, 128k general, 192k music\n' "${default_audio_bitrate}"
+    exit 0
+fi
+
+if [[ -z "${arg_first}" || $# -ne 1 ]]; then
+    printf 'Usage: %s SPEC.json             print the ffmpeg command for the edit\n' "${self_name}" >&2
+    printf '       %s SPEC.json | bash      print it and run it\n' "${self_name}" >&2
+    printf '       %s --list                transition names with a short description\n' "${self_name}" >&2
+    printf '       %s --help                this help\n\n' "${self_name}" >&2
+    exit 2
+fi
+
+if ! type jq >/dev/null 2>&1; then
+    printf 'error: jq not found (brew install jq)\n' >&2
+    exit 2
+fi
+
+if ! type ffprobe >/dev/null 2>&1; then
+    printf 'error: ffprobe not found (brew install ffmpeg)\n' >&2
+    exit 2
+fi
+
+spec="$1"
+
+if [[ ! -f "${spec}" || ! -r "${spec}" ]]; then
+    printf 'error: spec file not found: %s\n' "${spec}" >&2
+    exit 2
+fi
+
+jq -e 'type == "object"' -- "${spec}" >/dev/null 2>&1
+status=$?
+if ((status != 0)); then
+    printf 'error: %s is not a JSON object\n' "${spec}" >&2
+    exit 2
+fi
+
+raw_spec_dir="${spec%/*}"
+if [[ "${raw_spec_dir}" == "${spec}" ]]; then
+    raw_spec_dir="."
+elif [[ -z "${raw_spec_dir}" ]]; then
+    raw_spec_dir="/"
+fi
+spec_dir=$(cd -- "${raw_spec_dir}" 2>/dev/null && pwd)
+if [[ -z "${spec_dir}" ]]; then
+    printf 'error: cannot resolve the directory of %s\n' "${spec}" >&2
+    exit 2
+fi
+readonly spec_dir
+
+mapfile -t spec_present_keys < <(jq -r 'keys_unsorted[]' -- "${spec}")
+
+for key in "${spec_present_keys[@]}"; do
+    known=0
+    for k in "${spec_keys[@]}"; do
+        if [[ "${k}" == "${key}" ]]; then
+            known=1
+            break
+        fi
+    done
+    if ((known == 0)); then
+        hint=$(printf '%s\n' "${spec_keys[@]}" | awk -v w="${key}" '
+            function lev(s, t,    m, n, i, j, d, a, b, c) {
+                m = length(s); n = length(t)
+                for (i = 0; i <= m; i++) d[i, 0] = i
+                for (j = 0; j <= n; j++) d[0, j] = j
+                for (i = 1; i <= m; i++)
+                    for (j = 1; j <= n; j++) {
+                        a = d[i - 1, j] + 1; b = d[i, j - 1] + 1
+                        c = d[i - 1, j - 1] + (substr(s, i, 1) != substr(t, j, 1))
+                        if (b < a) a = b
+                        if (c < a) a = c
+                        d[i, j] = a
+                    }
+                return d[m, n]
+            }
+            { x = lev(w, $0); if (best == "" || x < bestd) { best = $0; bestd = x } }
+            END {
+                limit = int(length(w) / 3); if (limit < 2) limit = 2
+                if (best != "" && bestd <= limit) print best
+            }')
+        if [[ -n "${hint}" ]]; then
+            errors+=("unknown key '${key}' — did you mean '${hint}'?")
+        else
+            errors+=("unknown key '${key}' (allowed: ${spec_keys[*]})")
+        fi
+    fi
+done
+
+output="${default_output}"
+duration="${default_duration}"
+size=''
+fps=''
+audio=1
+codec="${default_codec}"
+crf="${default_crf}"
+preset="${default_preset}"
+audio_bitrate="${default_audio_bitrate}"
+
+mapfile -t spec_opts < <(jq -r '
+    . as $root |
+    ["output", "duration", "size", "fps", "audio", "codec", "crf", "preset", "audio_bitrate"] | .[] as $k |
+    (if ($root | has($k)) then ($root[$k] | type) else "missing" end) + "\t" +
+    (if ($root | has($k)) then ($root[$k] | if type == "array" then map(tostring) | join("x") else tostring end) else "" end)
+' -- "${spec}")
+
+IFS=$'\t' read -r out_t out_v <<<"${spec_opts[0]}"
+IFS=$'\t' read -r dur_t dur_v <<<"${spec_opts[1]}"
+IFS=$'\t' read -r size_t size_v <<<"${spec_opts[2]}"
+IFS=$'\t' read -r fps_t fps_v <<<"${spec_opts[3]}"
+IFS=$'\t' read -r aud_t aud_v <<<"${spec_opts[4]}"
+IFS=$'\t' read -r cod_t cod_v <<<"${spec_opts[5]}"
+IFS=$'\t' read -r crf_t crf_v <<<"${spec_opts[6]}"
+IFS=$'\t' read -r pre_t pre_v <<<"${spec_opts[7]}"
+IFS=$'\t' read -r abit_t abit_v <<<"${spec_opts[8]}"
+
+case "${out_t}" in
+missing) ;;
+string)
+    output="${out_v}"
+    [[ -n "${output}" ]] || errors+=("'output' must not be empty")
+    ;;
+*) errors+=("'output' must be a string") ;;
+esac
+
+case "${dur_t}" in
+missing) ;;
+number)
+    duration="${dur_v}"
+    dur_ok=0
+    if [[ "${duration}" =~ ^[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$ ]]; then
+        awk -v x="${duration}" 'BEGIN { exit !(x + 0 > 0) }' 2>/dev/null
+        (($? == 0)) && dur_ok=1
+    fi
+    ((dur_ok == 1)) || errors+=("'duration' must be greater than 0 (got ${duration})")
+    ;;
+*) errors+=("'duration' must be a number of seconds") ;;
+esac
+
+case "${size_t}" in
+missing) ;;
+string | array)
+    size="${size_v}"
+    if [[ "${size}" =~ ^([0-9]+)x([0-9]+)$ ]] && ((BASH_REMATCH[1] > 0 && BASH_REMATCH[2] > 0)); then
+        :
+    else
+        errors+=("'size' must be \"WIDTHxHEIGHT\" or [WIDTH, HEIGHT] (got ${size})")
+        size=''
+    fi
+    ;;
+*) errors+=("'size' must be \"WIDTHxHEIGHT\" or [WIDTH, HEIGHT]") ;;
+esac
+
+case "${fps_t}" in
+missing) ;;
+string | number)
+    fps="${fps_v}"
+    fps_ok=0
+    if [[ "${fps}" =~ ^[0-9]*\.?[0-9]+(/[0-9]+)?$ ]]; then
+        awk -v r="${fps}" 'BEGIN { n = split(r, a, "/"); exit !(n == 1 ? a[1] > 0 : a[1] > 0 && a[2] > 0) }' 2>/dev/null
+        (($? == 0)) && fps_ok=1
+    fi
+    if ((fps_ok == 0)); then
+        errors+=("'fps' must be a positive number or \"N/M\" (got ${fps})")
+        fps=''
+    fi
+    ;;
+*) errors+=("'fps' must be a number or \"N/M\"") ;;
+esac
+
+case "${aud_t}" in
+missing) ;;
+boolean) [[ "${aud_v}" == "true" ]] || audio=0 ;;
+*) errors+=("'audio' must be true or false") ;;
+esac
+
+case "${crf_t}" in
+missing) ;;
+number) crf="${crf_v}" ;;
+*) errors+=("'crf' must be a number") ;;
+esac
+
+case "${cod_t}" in
+missing) ;;
+string)
+    if [[ -z "${cod_v}" ]]; then
+        errors+=("'codec' must not be empty")
+    else
+        codec="${cod_v}"
+    fi
+    ;;
+*) errors+=("'codec' must be a string") ;;
+esac
+
+case "${pre_t}" in
+missing) ;;
+string)
+    if [[ -z "${pre_v}" ]]; then
+        errors+=("'preset' must not be empty")
+    else
+        preset="${pre_v}"
+    fi
+    ;;
+*) errors+=("'preset' must be a string") ;;
+esac
+
+case "${abit_t}" in
+missing) ;;
+string)
+    if [[ -z "${abit_v}" ]]; then
+        errors+=("'audio_bitrate' must not be empty")
+    else
+        audio_bitrate="${abit_v}"
+    fi
+    ;;
+*) errors+=("'audio_bitrate' must be a string") ;;
+esac
+
+if [[ -n "${output}" ]]; then
+    if [[ "${output}" != /* ]]; then
+        res_p="${output}"
+        while [[ "${res_p}" == ./* ]]; do
+            res_p="${res_p#./}"
+        done
+        output="${spec_dir}/${res_p}"
+    fi
+    output_name="${output##*/}"
+    if [[ "${output_name}" != *.* || "${output_name}" == .* ]]; then
+        errors+=("output '${output_name}' needs a file extension (e.g. .mp4)")
+    elif [[ -d "${output}" ]]; then
+        errors+=("output '${output}' is a directory")
+    else
+        out_parent="${output%/*}"
+        [[ -z "${out_parent}" ]] && out_parent="/"
+        if [[ ! -d "${out_parent}" ]]; then
+            errors+=("output directory does not exist: ${out_parent}")
+        fi
+    fi
+fi
+
+clips=()
+join_names=()
+join_durs=()
+
+seq_type=$(jq -r 'if has("sequence") then .sequence | type else "missing" end' -- "${spec}")
+
+if [[ "${seq_type}" != "array" ]]; then
+    errors+=("'sequence' must be a list of clips and transition names")
+else
+    seq_valid=$(jq -r '.sequence | if all(.[]; type == "string" and length > 0 and (test("\n") | not)) then "ok" else "bad" end' -- "${spec}")
+    if [[ "${seq_valid}" != "ok" ]]; then
+        errors+=("'sequence' entries must be non-empty strings")
+    else
+        mapfile -t seq_tokens < <(jq -r '.sequence[]' -- "${spec}")
+        pending=''
+        pending_dur=''
+
+        for token in "${seq_tokens[@]}"; do
+            name=''
+            secs=''
+
+            if [[ "${token}" =~ ^([A-Za-z0-9_-]+):(.*)$ ]]; then
+                name="${BASH_REMATCH[1]}"
+                secs="${BASH_REMATCH[2]}"
+            elif [[ "${token}" != */* && "${token}" != *.* ]]; then
+                name="${token}"
+                token_is_t=0
+                for t_item in "${transitions[@]}"; do
+                    if [[ "${t_item}" == "${name}" ]]; then
+                        token_is_t=1
+                        break
+                    fi
+                done
+
+                res_token="${token}"
+                if [[ "${res_token}" != /* ]]; then
+                    res_p="${res_token}"
+                    while [[ "${res_p}" == ./* ]]; do
+                        res_p="${res_p#./}"
+                    done
+                    res_token="${spec_dir}/${res_p}"
+                fi
+
+                if ((token_is_t == 1)) && [[ -e "${res_token}" ]]; then
+                    errors+=("'${token}' is both a transition and a file; write the file as './${token}'")
+                    continue
+                elif ((token_is_t == 0)) && [[ -f "${res_token}" ]]; then
+                    name=''
+                fi
+            fi
+
+            if [[ -n "${name}" ]]; then
+                is_t=0
+                for t_item in "${transitions[@]}"; do
+                    if [[ "${t_item}" == "${name}" ]]; then
+                        is_t=1
+                        break
+                    fi
+                done
+
+                if ((is_t == 0)); then
+                    hint=$(printf '%s\n' "${transitions[@]}" | awk -v w="${name}" '
+                        function lev(s, t,    m, n, i, j, d, a, b, c) {
+                            m = length(s); n = length(t)
+                            for (i = 0; i <= m; i++) d[i, 0] = i
+                            for (j = 0; j <= n; j++) d[0, j] = j
+                            for (i = 1; i <= m; i++)
+                                for (j = 1; j <= n; j++) {
+                                    a = d[i - 1, j] + 1; b = d[i, j - 1] + 1
+                                    c = d[i - 1, j - 1] + (substr(s, i, 1) != substr(t, j, 1))
+                                    if (b < a) a = b
+                                    if (c < a) a = c
+                                    d[i, j] = a
+                                }
+                            return d[m, n]
+                        }
+                        { x = lev(w, $0); if (best == "" || x < bestd) { best = $0; bestd = x } }
+                        END {
+                            limit = int(length(w) / 3); if (limit < 2) limit = 2
+                            if (best != "" && bestd <= limit) print best
+                        }')
+                    if [[ -n "${hint}" ]]; then
+                        errors+=("unknown transition '${name}' — did you mean '${hint}'?")
+                    else
+                        errors+=("unknown transition '${name}'")
+                    fi
+                elif ((${#clips[@]} == 0)); then
+                    errors+=("transition '${token}' must come after a clip")
+                elif [[ -n "${pending}" ]]; then
+                    errors+=("transition '${token}' follows '${pending}'; only one transition is allowed per join")
+                fi
+
+                if [[ -n "${secs}" ]]; then
+                    secs_ok=0
+                    if [[ "${secs}" =~ ^[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$ ]]; then
+                        awk -v x="${secs}" 'BEGIN { exit !(x + 0 > 0) }' 2>/dev/null
+                        (($? == 0)) && secs_ok=1
+                    fi
+                    if ((secs_ok == 0)); then
+                        errors+=("transition '${token}': duration must be greater than 0")
+                        secs=''
+                    fi
+                fi
+
+                pending="${name}"
+                pending_dur="${secs:-${duration}}"
+                continue
+            fi
+
+            if ((${#clips[@]} > 0)); then
+                join_names+=("${pending}")
+                if [[ -n "${pending}" ]]; then
+                    join_durs+=("${pending_dur}")
+                else
+                    join_durs+=("")
+                fi
+            fi
+
+            res_path="${token}"
+            if [[ "${res_path}" != /* ]]; then
+                res_p="${res_path}"
+                while [[ "${res_p}" == ./* ]]; do
+                    res_p="${res_p#./}"
+                done
+                res_path="${spec_dir}/${res_p}"
+            fi
+            clips+=("${res_path}")
+            pending=''
+            pending_dur=''
+        done
+
+        if [[ -n "${pending}" ]]; then
+            errors+=("the sequence ends with transition '${pending}'; a clip must follow it")
+        fi
+        if ((${#clips[@]} == 0)); then
+            errors+=("'sequence' contains no clips")
+        fi
+    fi
+fi
+
+clip_len=()
+clip_w=()
+clip_h=()
+clip_rate=()
+clip_audio=()
+clip_vsig=()
+clip_asig=()
+
+declare -A probe_cache=()
+declare -A probe_err_cache=()
+
+for i in "${!clips[@]}"; do
+    path="${clips[i]}"
+    clip_len[i]='-'
+
+    if [[ -n "${probe_err_cache[${path}]+_}" ]]; then
+        errors+=("${probe_err_cache[${path}]}")
+        continue
+    fi
+
+    if [[ -n "${probe_cache[${path}]+_}" ]]; then
+        IFS=$'\t' read -r len w h rate has_audio vsig asig <<<"${probe_cache[${path}]}"
+        clip_len[i]="${len}"
+        clip_w[i]="${w}"
+        clip_h[i]="${h}"
+        clip_rate[i]="${rate}"
+        clip_audio[i]="${has_audio}"
+        clip_vsig[i]="${vsig}"
+        clip_asig[i]="${asig}"
+        continue
+    fi
+
+    if [[ ! -f "${path}" ]]; then
+        msg="file not found: ${path}"
+        errors+=("${msg}")
+        probe_err_cache["${path}"]="${msg}"
+        continue
+    fi
+
+    probe=$(ffprobe -v error -show_entries "${probe_entries}" -of json -i "${path}" 2>/dev/null)
+    status=$?
+    if ((status != 0)); then
+        msg="cannot read ${path##*/} (not a video file?)"
+        errors+=("${msg}")
+        probe_err_cache["${path}"]="${msg}"
+        continue
+    fi
+
+    info=$(jq -r '
+        def s: if . == null or . == "" then "-" else tostring end;
+        def ok_rate: . != null and . != "0/0" and . != "";
+        (.streams // []) as $all
+        | ($all | map(select(.codec_type == "video")) | first) as $v
+        | ($all | map(select(.codec_type == "audio")) | first) as $a
+        | if $v == null then "novideo" else
+            [ ($v.duration // .format.duration | s),
+              ($v.width | s), ($v.height | s),
+              (if ($v.avg_frame_rate | ok_rate) then $v.avg_frame_rate
+               elif ($v.r_frame_rate | ok_rate) then $v.r_frame_rate else null end | s),
+              (if $a then "1" else "0" end),
+              ([$v.codec_name, $v.profile, "\($v.width)x\($v.height)", ($v.sample_aspect_ratio // "1:1"),
+                $v.pix_fmt, $v.avg_frame_rate, $v.time_base] | map(s) | join("|")),
+              (if $a then [$a.codec_name, $a.sample_rate, ($a.channel_layout // "\($a.channels)ch")]
+                          | map(s) | join("|") else "-" end)
+            ] | join("\t")
+          end' <<<"${probe}")
+
+    name="${path##*/}"
+    if [[ "${info}" == "novideo" ]]; then
+        msg="${name} has no video stream"
+        errors+=("${msg}")
+        probe_err_cache["${path}"]="${msg}"
+        continue
+    fi
+
+    IFS=$'\t' read -r len w h rate has_audio vsig asig <<<"${info}"
+
+    len_ok=0
+    if [[ "${len}" =~ ^[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$ ]]; then
+        awk -v x="${len}" 'BEGIN { exit !(x + 0 > 0) }' 2>/dev/null
+        (($? == 0)) && len_ok=1
+    fi
+    if ((len_ok == 0)); then
+        msg="${name}: cannot determine the duration"
+        errors+=("${msg}")
+        probe_err_cache["${path}"]="${msg}"
+        continue
+    fi
+
+    if [[ ! "${w}" =~ ^[0-9]+$ || ! "${h}" =~ ^[0-9]+$ ]]; then
+        msg="${name}: cannot determine the video size"
+        errors+=("${msg}")
+        probe_err_cache["${path}"]="${msg}"
+        continue
+    fi
+
+    rate_ok=0
+    if [[ "${rate}" =~ ^[0-9]*\.?[0-9]+(/[0-9]+)?$ ]]; then
+        awk -v r="${rate}" 'BEGIN { n = split(r, a, "/"); exit !(n == 1 ? a[1] > 0 : a[1] > 0 && a[2] > 0) }' 2>/dev/null
+        (($? == 0)) && rate_ok=1
+    fi
+    if ((rate_ok == 0)); then
+        msg="${name}: cannot determine the frame rate"
+        errors+=("${msg}")
+        probe_err_cache["${path}"]="${msg}"
+        continue
+    fi
+
+    probe_cache["${path}"]="${len}"$'\t'"${w}"$'\t'"${h}"$'\t'"${rate}"$'\t'"${has_audio}"$'\t'"${vsig}"$'\t'"${asig}"
+    clip_len[i]="${len}"
+    clip_w[i]="${w}"
+    clip_h[i]="${h}"
+    clip_rate[i]="${rate}"
+    clip_audio[i]="${has_audio}"
+    clip_vsig[i]="${vsig}"
+    clip_asig[i]="${asig}"
+done
+
+steps=()
+total=''
+
+if ((${#clips[@]} > 0)); then
+    plan_buf=""
+    for i in "${!clips[@]}"; do
+        printf -v row 'C\t%s\t%s\n' "${clips[i]##*/}" "${clip_len[i]}"
+        plan_buf+="${row}"
+    done
+    for k in "${!join_names[@]}"; do
+        printf -v row 'J\t%s\t%s\n' "${join_names[k]:--}" "${join_durs[k]:-0}"
+        plan_buf+="${row}"
+    done
+
+    while IFS=$'\t' read -r kind a b c d e; do
+        case "${kind}" in
+        E) errors+=("${a}") ;;
+        S) steps+=("${a}"$'\t'"${b}"$'\t'"${c}"$'\t'"${d}"$'\t'"${e}") ;;
+        T) total="${a}" ;;
+        esac
+    done < <(awk '
+        function secs(x) { return sprintf("%.2fs", x) }
+        function num(x,    s) {
+            s = sprintf("%.6f", x); sub(/0+$/, "", s); sub(/\.$/, "", s)
+            return (s == "" || s == "-0") ? "0" : s
+        }
+        BEGIN { FS = "\t"; eps = 1e-6; n = 0; j = 0 }
+        $1 == "C" { name[n] = $2; len[n] = $3; n++ }
+        $1 == "J" { jname[j] = $2; t[j] = $3 + 0; j++ }
+        END {
+            for (i = 0; i < n; i++) {
+                tin[i] = (i > 0) ? t[i - 1] : 0
+                tout[i] = (i < n - 1) ? t[i] : 0
+                if (len[i] == "-") unknown = 1
+            }
+            for (k = 0; k < n - 1; k++) {
+                if (t[k] == 0 || len[k] == "-" || len[k + 1] == "-") continue
+                why = ""
+                for (m = 0; m < 2; m++) {
+                    i = k + m
+                    if (tin[i] + tout[i] <= len[i] + eps) continue
+                    if (tin[i] > 0 && tout[i] > 0)
+                        w = name[i] " is " secs(len[i]) "; needs " secs(tin[i]) " in + " secs(tout[i]) " out"
+                    else
+                        w = name[i] " is " secs(len[i])
+                    why = (why == "") ? w : why "; " w
+                }
+                if (why == "") continue
+                max = len[k] - tin[k]
+                if (len[k + 1] - tout[k + 1] < max) max = len[k + 1] - tout[k + 1]
+                limit = (max > eps) ? "max " secs(max) : "no duration fits"
+                print "E\ttransition too long: join " k + 1 "  " name[k] " → " name[k + 1] "  " jname[k] " " secs(t[k]) "  " limit "  (" why ")"
+                bad = 1
+            }
+            if (bad || unknown) exit
+            out = len[0]
+            for (k = 1; k < n; k++) {
+                if (t[k - 1] == 0) {
+                    print "S\t" k "\tcut\t-\t0\t" num(out)
+                    out += len[k]
+                } else {
+                    print "S\t" k "\txfade\t" jname[k - 1] "\t" num(t[k - 1]) "\t" num(out - t[k - 1])
+                    out += len[k] - t[k - 1]
+                }
+            }
+            print "T\t" num(out)
+        }' <<<"${plan_buf}")
+fi
+
+if ((${#errors[@]} > 0)); then
+    if ((${#errors[@]} == 1)); then
+        printf 'error: 1 problem found — no command printed\n' >&2
+    else
+        printf 'error: %d problems found — no command printed\n' "${#errors[@]}" >&2
+    fi
+    printf '  %s\n' "${errors[@]}" >&2
+    exit 1
+fi
+
+width="${clip_w[0]}"
+height="${clip_h[0]}"
+if [[ -n "${size}" ]]; then
+    width="${size%x*}"
+    height="${size#*x}"
+fi
+width=$((width - width % 2))
+height=$((height - height % 2))
+((width < 2)) && width=2
+((height < 2)) && height=2
+
+rate_in="${fps:-${clip_rate[0]}}"
+rate=$(awk -v r="${rate_in}" 'BEGIN {
+    n = split(r, a, "/"); x = (n == 2) ? a[1] / a[2] : a[1] + 0
+    i = int(x + 0.5)
+    if (i > 0 && x - i < 0.01 && i - x < 0.01) { print i; exit }
+    i = int(x * 1.001 + 0.5); y = i * 1000 / 1001
+    if (i > 0 && x - y < 0.01 && y - x < 0.01) { print i * 1000 "/1001"; exit }
+    print r
+}')
+
+use_audio=0
+if ((audio != 0)); then
+    for has_audio in "${clip_audio[@]}"; do
+        if ((has_audio != 0)); then
+            use_audio=1
+            break
+        fi
+    done
+fi
+
+reasons=()
+video_blocked=0
+
+named=()
+for k in "${!join_names[@]}"; do
+    if [[ -n "${join_names[k]}" ]]; then
+        named+=("join $((k + 1)) ${join_names[k]}")
+    fi
+done
+if ((${#named[@]} > 0)); then
+    joined=$(printf ', %s' "${named[@]}")
+    reasons+=("transitions need re-encoding (${joined:2})")
+fi
+
+if [[ -n "${size}" && "${size}" != "${clip_w[0]}x${clip_h[0]}" ]]; then
+    reasons+=("size ${size} differs from the clips (${clip_w[0]}x${clip_h[0]})")
+    video_blocked=1
+fi
+
+if [[ -n "${fps}" ]]; then
+    rates_match=$(awk -v p="${fps}" -v q="${clip_rate[0]}" 'BEGIN {
+        n = split(p, a, "/"); x = (n == 2) ? a[1] / a[2] : a[1] + 0
+        n = split(q, b, "/"); y = (n == 2) ? b[1] / b[2] : b[1] + 0
+        exit !(x - y < 1e-6 && y - x < 1e-6)
+    }' 2>/dev/null && echo "yes" || echo "no")
+    if [[ "${rates_match}" != "yes" ]]; then
+        first_r_text=$(awk -v r="${clip_rate[0]}" 'BEGIN {
+            n = split(r, a, "/"); x = (n == 2) ? a[1] / a[2] : a[1] + 0
+            s = sprintf("%.3f", x); sub(/0+$/, "", s); sub(/\.$/, "", s); print s
+        }')
+        reasons+=("fps ${fps} differs from the clips (${first_r_text})")
+        video_blocked=1
+    fi
+fi
+
+first_name="${clips[0]##*/}"
+for ((i = 1; i < ${#clips[@]}; i++)); do
+    diffs=()
+    IFS='|' read -r -a first_v <<<"${clip_vsig[0]}"
+    IFS='|' read -r -a this_v <<<"${clip_vsig[i]}"
+    for f in "${!video_sig_labels[@]}"; do
+        if [[ "${first_v[f]}" != "${this_v[f]}" ]]; then
+            diffs+=("${video_sig_labels[f]} ${first_v[f]} vs ${this_v[f]}")
+            video_blocked=1
+        fi
+    done
+    if ((audio != 0)); then
+        if [[ "${clip_audio[0]}" != "${clip_audio[i]}" ]]; then
+            if ((clip_audio[0] != 0)); then
+                diffs+=('no audio')
+            else
+                diffs+=('has audio (first clip has none)')
+            fi
+        elif ((clip_audio[0] != 0)); then
+            IFS='|' read -r -a first_a <<<"${clip_asig[0]}"
+            IFS='|' read -r -a this_a <<<"${clip_asig[i]}"
+            for f in "${!audio_sig_labels[@]}"; do
+                if [[ "${first_a[f]}" != "${this_a[f]}" ]]; then
+                    diffs+=("${audio_sig_labels[f]} ${first_a[f]} vs ${this_a[f]}")
+                fi
+            done
+        fi
+    fi
+    if ((${#diffs[@]} > 0)); then
+        joined=$(printf ', %s' "${diffs[@]}")
+        reasons+=("${clips[i]##*/} differs from ${first_name}: ${joined:2}")
+    fi
+done
+
+hybrid=0
+codec_note=''
+pieces=()
+copied_frames=0
+
+if ((${#reasons[@]} > 0 && video_blocked == 0)); then
+    IFS='|' read -r -a first_v <<<"${clip_vsig[0]}"
+    src_encoder=''
+    case "${first_v[0]}" in
+    h264) src_encoder='libx264' ;;
+    hevc) src_encoder='libx265' ;;
+    esac
+    if [[ -z "${src_encoder}" ]]; then
+        reasons+=("only H.264 and H.265 clips can be partly copied (clips are ${first_v[0]})")
+    elif [[ "${cod_t}" != "missing" && "${codec}" != "${src_encoder}" ]]; then
+        reasons+=("codec ${codec} differs from the clips (${first_v[0]}, encoder ${src_encoder})")
+    else
+        [[ "${cod_t}" == "missing" ]] && codec_note='matches clips'
+        codec="${src_encoder}"
+        hybrid=1
+    fi
+fi
+
+if ((hybrid == 1)); then
+    # Per clip: frame count, reorder delay (s), keyframe decode indices, keyframe times from the
+    # first frame, and keyframe times as ffmpeg's -ss counts them (from the file's start_time).
+    declare -A kf_cache=()
+    hplan_buf=""
+    printf -v row 'R\t%s\n' "${rate}"
+    hplan_buf+="${row}"
+    for i in "${!clips[@]}"; do
+        path="${clips[i]}"
+        if [[ -n "${kf_cache[${path}]+_}" ]]; then
+            kf="${kf_cache[${path}]}"
+        else
+            fstart=$(ffprobe -v error -show_entries format=start_time -of csv=p=0 -i "${path}" 2>/dev/null)
+            [[ "${fstart}" =~ ^-?[0-9]*\.?[0-9]+$ ]] || fstart=0
+            kf=$(ffprobe -v error -select_streams v:0 -show_entries packet=pts_time,dts_time,flags \
+                -of csv=p=0 -i "${path}" 2>/dev/null | awk -F, -v fstart="${fstart}" '
+            NR == 1 { p0 = $1; d0 = $2 }
+            $1 != "N/A" && (minp == "" || $1 + 0 < minp) { minp = $1 + 0 }
+            $3 ~ /K/ && $1 != "N/A" { k++; idx[k] = NR - 1; pt[k] = $1 + 0 }
+            END {
+                delay = (p0 != "N/A" && d0 != "N/A" && p0 - d0 > 0) ? p0 - d0 : 0
+                for (m = 1; m <= k; m++) {
+                    ki = ki (m > 1 ? "," : "") idx[m]
+                    kt = kt (m > 1 ? "," : "") sprintf("%.6f", pt[m] - minp)
+                    ks = ks (m > 1 ? "," : "") sprintf("%.6f", pt[m] - fstart)
+                }
+                printf "%d\t%.6f\t%s\t%s\t%s\n", NR, delay, ki, kt, ks
+            }')
+            kf_cache["${path}"]="${kf}"
+        fi
+        printf -v row 'C\t%s\t%s\n' "${i}" "${kf}"
+        hplan_buf+="${row}"
+    done
+    for k in "${!join_names[@]}"; do
+        printf -v row 'J\t%s\t%s\t%s\n' "${k}" "${join_durs[k]:-0}" "${join_names[k]:--}"
+        hplan_buf+="${row}"
+    done
+
+    # K = copied piece (clip, from frame, to frame); E = encoded piece (clip, from, to, seek,
+    # transition into it and its length in frames); D = end of an encoded run (reorder delay in
+    # frames to give it). Transitions are rounded to whole frames so every piece has an exact
+    # frame count.
+    mapfile -t pieces < <(awk '
+        BEGIN { FS = "\t"; OFS = "\t"; eps = 1e-6; n = 0 }
+        $1 == "R" { m = split($2, a, "/"); fps = (m == 2) ? a[1] / a[2] : a[1] + 0 }
+        $1 == "C" {
+            i = $2; fr[i] = $3; nd[i] = int($4 * fps + 0.5)
+            nk[i] = split($5, ki, ","); split($6, kt, ","); split($7, ks, ",")
+            for (m = 1; m <= nk[i]; m++) { kidx[i, m] = ki[m]; ktime[i, m] = kt[m]; kseek[i, m] = ks[m] }
+            if (i + 1 > n) n = i + 1
+        }
+        $1 == "J" {
+            tf[$2] = ($3 + 0 > 0) ? int($3 * fps + 0.5) : 0
+            if ($3 + 0 > 0 && tf[$2] < 1) tf[$2] = 1
+            t[$2] = tf[$2] / fps; jn[$2] = $4
+        }
+        function enc(i, from, to, seek, name, dur) {
+            if (!open) { open = 1; first = i }
+            last = i
+            print "E", i, from, to, seek, name, dur
+        }
+        function close_run(    d) {
+            if (!open) return
+            d = (nd[first] > nd[last]) ? nd[first] : nd[last]
+            print "D", d
+            open = 0
+        }
+        END {
+            for (i = 0; i < n; i++) {
+                tin = (i > 0) ? t[i - 1] : 0
+                tout = (i < n - 1) ? t[i] : 0
+                s = -1; e = -1; es = 0
+                if (tin == 0) s = 0
+                else for (m = 1; m <= nk[i]; m++) if (ktime[i, m] >= tin - eps) { s = kidx[i, m]; break }
+                if (tout == 0) e = fr[i]
+                else for (m = nk[i]; m >= 1; m--) if (ktime[i, m] <= fr[i] / fps - tout + eps) {
+                    e = kidx[i, m]; es = kseek[i, m] - 0.001; if (es < 0) es = 0; break
+                }
+                if (s >= 0 && e > s) {
+                    if (open) { enc(i, 0, s, 0, jn[i - 1], tf[i - 1]); close_run() }
+                    print "K", i, s, e
+                    if (tout > 0) enc(i, e, fr[i], es, "-", 0)
+                } else {
+                    if (open) enc(i, 0, fr[i], 0, jn[i - 1], tf[i - 1])
+                    else enc(i, 0, fr[i], 0, "-", 0)
+                    if (tout == 0) close_run()
+                }
+            }
+            close_run()
+        }' <<<"${hplan_buf}")
+
+    for i in "${!clips[@]}"; do
+        clip_frames[i]=$(awk -F'\t' -v i="${i}" '$1 == "C" && $2 == i { print $3 }' <<<"${hplan_buf}")
+    done
+    for p in "${pieces[@]}"; do
+        IFS=$'\t' read -r kind pi pfrom pto _ <<<"${p}"
+        [[ "${kind}" == "K" ]] && copied_frames=$((copied_frames + pto - pfrom))
+    done
+fi
+
+name_width=0
+for path in "${clips[@]}"; do
+    name="${path##*/}"
+    ((${#name} > name_width)) && name_width=${#name}
+done
+
+mapfile -t present_key_list < <(jq -r 'keys[]' -- "${spec}")
+given_keys=" ${present_key_list[*]} "
+
+disp_rate=$(awk -v r="${rate}" 'BEGIN {
+    n = split(r, a, "/"); x = (n == 2) ? a[1] / a[2] : a[1] + 0
+    s = sprintf("%.3f", x); sub(/0+$/, "", s); sub(/\.$/, "", s); print s
+}')
+
+{
+    printf 'settings:\n'
+    if [[ "${given_keys}" == *" output "* ]]; then
+        printf '  %-14s %s\n' "output" "${output#"${spec_dir}"/}"
+    else
+        printf '  %-14s %-22s (%s)\n' "output" "${output#"${spec_dir}"/}" "default"
+    fi
+
+    if [[ "${given_keys}" == *" duration "* ]]; then
+        printf '  %-14s %s\n' "duration" "${duration}s"
+    else
+        printf '  %-14s %-22s (%s)\n' "duration" "${duration}s" "default"
+    fi
+
+    if [[ "${given_keys}" == *" size "* ]]; then
+        printf '  %-14s %s\n' "size" "${width}x${height}"
+    else
+        printf '  %-14s %-22s (%s)\n' "size" "${width}x${height}" "default: first clip"
+    fi
+
+    if [[ "${given_keys}" == *" fps "* ]]; then
+        printf '  %-14s %s\n' "fps" "${disp_rate}"
+    else
+        printf '  %-14s %-22s (%s)\n' "fps" "${disp_rate}" "default: first clip"
+    fi
+
+    if ((audio != 0)); then
+        aud_str="true"
+    else
+        aud_str="false"
+    fi
+    if [[ "${given_keys}" == *" audio "* ]]; then
+        printf '  %-14s %s\n' "audio" "${aud_str}"
+    else
+        printf '  %-14s %-22s (%s)\n' "audio" "${aud_str}" "default"
+    fi
+
+    if [[ "${given_keys}" == *" codec "* ]]; then
+        printf '  %-14s %s\n' "codec" "${codec}"
+    elif [[ -n "${codec_note}" ]]; then
+        printf '  %-14s %-22s (%s)\n' "codec" "${codec}" "${codec_note}"
+    else
+        printf '  %-14s %-22s (%s)\n' "codec" "${codec}" "default"
+    fi
+
+    if [[ "${given_keys}" == *" crf "* ]]; then
+        printf '  %-14s %s\n' "crf" "${crf}"
+    else
+        printf '  %-14s %-22s (%s)\n' "crf" "${crf}" "default"
+    fi
+
+    if [[ "${given_keys}" == *" preset "* ]]; then
+        printf '  %-14s %s\n' "preset" "${preset}"
+    else
+        printf '  %-14s %-22s (%s)\n' "preset" "${preset}" "default"
+    fi
+
+    if [[ "${given_keys}" == *" audio_bitrate "* ]]; then
+        printf '  %-14s %s\n' "audio_bitrate" "${audio_bitrate}"
+    else
+        printf '  %-14s %-22s (%s)\n' "audio_bitrate" "${audio_bitrate}" "default"
+    fi
+
+    printf 'clips:\n'
+    for i in "${!clips[@]}"; do
+        if ((clip_audio[i] != 0)); then
+            sound='audio'
+        elif ((audio != 0)); then
+            sound='no audio  → silence added'
+        else
+            sound='no audio'
+        fi
+        c_rate_str=$(awk -v r="${clip_rate[i]}" 'BEGIN {
+            n = split(r, a, "/"); x = (n == 2) ? a[1] / a[2] : a[1] + 0
+            s = sprintf("%.3f", x); sub(/0+$/, "", s); sub(/\.$/, "", s); print s
+        }')
+        printf '  %-*s  %9s %6sfps  %6.1fs  %s\n' "${name_width}" "${clips[i]##*/}" \
+            "${clip_w[i]}x${clip_h[i]}" "${c_rate_str}" "${clip_len[i]}" "${sound}"
+    done
+
+    line="${clips[0]##*/}"
+    line="${line%.*}"
+    for step in "${steps[@]}"; do
+        IFS=$'\t' read -r k kind tname tdur offset <<<"${step}"
+        stem="${clips[k]##*/}"
+        stem="${stem%.*}"
+        if [[ "${kind}" == "cut" ]]; then
+            line+=" ─cut─ ${stem}"
+        else
+            line+=" ─${tname} ${tdur}s─ ${stem}"
+        fi
+    done
+    printf 'plan: %s   (%.1fs)\n' "${line}" "${total}"
+
+    if ((${#reasons[@]} == 0)); then
+        printf 'method: stream copy (all joins are cuts and clips are identical)\n'
+    elif ((hybrid == 1)); then
+        if ((use_audio != 0)); then
+            sound="; audio re-encoded: aac ${audio_bitrate}"
+        else
+            sound='; no audio'
+        fi
+        hybrid_secs=$(awk -v c="${copied_frames}" -v t="${total}" -v r="${rate}" 'BEGIN {
+            n = split(r, a, "/"); x = (n == 2) ? a[1] / a[2] : a[1] + 0
+            printf "%.1fs copied, %.1fs", c / x, t - c / x
+        }')
+        printf 'method: hybrid → video %s re-encoded around transitions (%s crf %s preset %s)%s\n' \
+            "${hybrid_secs}" "${codec}" "${crf}" "${preset}" "${sound}"
+        printf '  full copy not possible: %s\n' "${reasons[@]}"
+    else
+        if ((use_audio != 0)); then
+            sound=", aac ${audio_bitrate}"
+        else
+            sound=', no audio'
+        fi
+        printf 'method: re-encode → %sx%s %sfps, %s crf %s preset %s%s\n' \
+            "${width}" "${height}" "${disp_rate}" "${codec}" "${crf}" "${preset}" "${sound}"
+        printf '  copy not possible: %s\n' "${reasons[@]}"
+    fi
+} >&2
+
+output_dir="${output%/*}"
+output_name="${output##*/}"
+temp="${output_dir}/${output_name%.*}-p.${output_name##*.}"
+
+mp4_like=0
+case "${output_name##*.}" in
+[Mm][Pp]4 | [Mm]4[Vv] | [Mm][Oo][Vv]) mp4_like=1 ;;
+esac
+
+ext_args=()
+((mp4_like == 1)) && ext_args=(-movflags +faststart)
+
+out=()
+
+if ((${#reasons[@]} == 0)); then
+    out+=("ffmpeg -hide_banner -loglevel error -stats -y")
+    out+=("    -f concat -safe 0")
+    out+=("    -i <(printf '%s\\n'")
+    for path in "${clips[@]}"; do
+        entry="file '${path//\'/\'\\\'\'}'"
+        if [[ "${entry}" =~ [\"\$\`\\!] ]]; then
+            if [[ "${entry}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+                q_entry="${entry}"
+            else
+                q_entry="'${entry//\'/\'\\\'\'}'"
+            fi
+            out+=("        ${q_entry}")
+        else
+            out+=("        \"${entry}\"")
+        fi
+    done
+    out[${#out[@]} - 1]+=")"
+    maps="-map 0:v:0"
+    ((use_audio != 0)) && maps+=" -map 0:a:0"
+    out+=("    ${maps} -c copy${ext_args[*]:+ ${ext_args[*]}}")
+elif ((hybrid == 1)); then
+    IFS='|' read -r -a first_v <<<"${clip_vsig[0]}"
+    bsf="${first_v[0]}_mp4toannexb"
+    pix_fmt="${first_v[4]}"
+    if [[ "${crf}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+        q_crf="${crf}"
+    else
+        q_crf="'${crf//\'/\'\\\'\'}'"
+    fi
+    if [[ "${preset}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+        q_preset="${preset}"
+    else
+        q_preset="'${preset//\'/\'\\\'\'}'"
+    fi
+
+    out+=("tmp=\$(mktemp -d \"\${TMPDIR:-/tmp}/stitch.XXXXXX\")")
+    list=()
+    run=()
+    seg=0
+    for p in "${pieces[@]}"; do
+        IFS=$'\t' read -r kind pi pfrom pto pseek pname pdur <<<"${p}"
+        if [[ "${kind}" == "E" ]]; then
+            run+=("${p}")
+            continue
+        fi
+
+        if [[ "${kind}" == "K" ]]; then
+            path="${clips[pi]}"
+            if [[ "${path}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+                q_path="${path}"
+            else
+                q_path="'${path//\'/\'\\\'\'}'"
+            fi
+            cuts=()
+            ((pfrom > 0)) && cuts+=("${pfrom}")
+            ((pto < clip_frames[pi])) && cuts+=("${pto}")
+            out+=("&& ffmpeg -hide_banner -loglevel error -y -i ${q_path}")
+            if ((${#cuts[@]} == 0)); then
+                out+=("    -map 0:v:0 -c copy -bsf:v ${bsf} -f mpegts")
+                out+=("    -- \"\$tmp/s${seg}.ts\"")
+                file="s${seg}.ts"
+            else
+                joined=$(printf ',%s' "${cuts[@]}")
+                out+=("    -map 0:v:0 -c copy -bsf:v ${bsf} -f segment -segment_format mpegts -segment_frames ${joined:1}")
+                out+=("    -- \"\$tmp/s${seg}-%d.ts\"")
+                if ((pfrom > 0)); then
+                    file="s${seg}-1.ts"
+                else
+                    file="s${seg}-0.ts"
+                fi
+            fi
+            secs=$(awk -v f="$((pto - pfrom))" -v r="${rate}" 'BEGIN {
+                n = split(r, a, "/"); x = (n == 2) ? a[1] / a[2] : a[1] + 0
+                s = sprintf("%.6f", f / x); sub(/0+$/, "", s); sub(/\.$/, "", s); print s
+            }')
+            list+=("\"file '\$tmp/${file}'\" \"duration ${secs}\"")
+            seg=$((seg + 1))
+            continue
+        fi
+
+        # D: encode the collected run of pieces (clip tails, whole clips, clip heads).
+        delay="${pi}"
+        out+=("&& ffmpeg -hide_banner -loglevel error -stats -y")
+        graph=()
+        r_total=0
+        for j in "${!run[@]}"; do
+            IFS=$'\t' read -r _ ri rfrom rto rseek rname rdur <<<"${run[j]}"
+            path="${clips[ri]}"
+            if [[ "${path}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+                q_path="${path}"
+            else
+                q_path="'${path//\'/\'\\\'\'}'"
+            fi
+            if ((rfrom > 0)); then
+                out+=("    -ss ${rseek} -i ${q_path}")
+            else
+                out+=("    -i ${q_path}")
+            fi
+            graph+=("[$j:v:0]trim=end_frame=$((rto - rfrom)),setpts=PTS-STARTPTS,fps=${rate},settb=AVTB[p${j}]")
+            if ((j == 0)); then
+                cur="p0"
+            else
+                # Offset half a frame early so exactly r_total - rdur frames of the first input
+                # pass through untouched.
+                IFS=$'\t' read -r x_dur x_off <<<"$(awk -v t="${r_total}" -v d="${rdur}" -v r="${rate}" 'BEGIN {
+                    n = split(r, a, "/"); x = (n == 2) ? a[1] / a[2] : a[1] + 0
+                    printf "%.6f\t%.6f\n", d / x, (t - d - 0.5) / x
+                }')"
+                graph+=("[${cur}][p${j}]xfade=transition=${rname}:duration=${x_dur}:offset=${x_off}[q${j}]")
+                cur="q${j}"
+            fi
+            r_total=$((j == 0 ? rto - rfrom : r_total + rto - rfrom - rdur))
+        done
+        graph+=("[${cur}]format=${pix_fmt}[rout]")
+        out+=("    -filter_complex '")
+        last=$((${#graph[@]} - 1))
+        for g in "${!graph[@]}"; do
+            if ((g < last)); then
+                out+=("        ${graph[g]};")
+            else
+                out+=("        ${graph[g]}")
+            fi
+        done
+        out+=("    '")
+        if [[ "${codec}" == "libx265" ]]; then
+            venc="-c:v libx265 -crf ${q_crf} -preset ${q_preset} -x265-params log-level=error:bframes=0"
+        else
+            venc="-c:v libx264 -crf ${q_crf} -preset ${q_preset} -bf 0"
+        fi
+        if ((delay > 0)); then
+            # No B-frames here, but DTS must trail PTS by the clips' reorder delay so that it
+            # stays increasing across the joins with the copied pieces.
+            frame_tb=$(awk -v r="${rate}" 'BEGIN { n = split(r, a, "/"); print (n == 2) ? a[2] "/" a[1] : "1/" a[1] }')
+            venc+=" -bsf:v 'setts=dts=PTS-round(${delay}*${frame_tb}/TB)'"
+        fi
+        out+=("    -map '[rout]' ${venc} -f mpegts")
+        out+=("    -- \"\$tmp/s${seg}.ts\"")
+        secs=$(awk -v f="${r_total}" -v r="${rate}" 'BEGIN {
+            n = split(r, a, "/"); x = (n == 2) ? a[1] / a[2] : a[1] + 0
+            s = sprintf("%.6f", f / x); sub(/0+$/, "", s); sub(/\.$/, "", s); print s
+        }')
+        list+=("\"file '\$tmp/s${seg}.ts'\" \"duration ${secs}\"")
+        seg=$((seg + 1))
+        run=()
+    done
+
+    out+=("&& ffmpeg -hide_banner -loglevel error -stats -y")
+    out+=("    -f concat -safe 0")
+    out+=("    -i <(printf '%s\\n'")
+    for entry in "${list[@]}"; do
+        out+=("        ${entry}")
+    done
+    out[${#out[@]} - 1]+=")"
+
+    maps="-map 0:v:0"
+    if ((use_audio != 0)); then
+        for path in "${clips[@]}"; do
+            if [[ "${path}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+                q_path="${path}"
+            else
+                q_path="'${path//\'/\'\\\'\'}'"
+            fi
+            out+=("    -i ${q_path}")
+        done
+
+        graph=()
+        fmt='aformat=sample_fmts=fltp:channel_layouts=stereo'
+        n=${#clips[@]}
+        for ((i = 0; i < n; i++)); do
+            label="a${i}"
+            ((n == 1)) && label='aout'
+            len=$(awk -v f="${clip_frames[i]}" -v r="${rate}" 'BEGIN {
+                n = split(r, a, "/"); x = (n == 2) ? a[1] / a[2] : a[1] + 0
+                printf "%.6f\n", f / x
+            }')
+            if ((clip_audio[i] != 0)); then
+                graph+=("[$((i + 1)):a:0]asetpts=PTS-STARTPTS,aresample=${audio_rate},${fmt},apad=whole_dur=${len},atrim=duration=${len}[${label}]")
+            else
+                graph+=("anullsrc=r=${audio_rate}:cl=stereo,${fmt},atrim=duration=${len}[${label}]")
+            fi
+        done
+        cur_a='a0'
+        for step in "${steps[@]}"; do
+            IFS=$'\t' read -r k kind tname tdur offset <<<"${step}"
+            if ((k == n - 1)); then
+                out_a='aout'
+            else
+                out_a="y${k}"
+            fi
+            if [[ "${kind}" == "xfade" ]]; then
+                # Same whole-frame length as the video transition.
+                tdur=$(awk -v d="${tdur}" -v r="${rate}" 'BEGIN {
+                    n = split(r, a, "/"); x = (n == 2) ? a[1] / a[2] : a[1] + 0
+                    f = int(d * x + 0.5); if (f < 1) f = 1
+                    printf "%.6f\n", f / x
+                }')
+                graph+=("[${cur_a}][a${k}]acrossfade=d=${tdur}[${out_a}]")
+            else
+                graph+=("[${cur_a}][a${k}]concat=n=2:v=0:a=1[${out_a}]")
+            fi
+            cur_a="${out_a}"
+        done
+
+        out+=("    -filter_complex '")
+        last=$((${#graph[@]} - 1))
+        for g in "${!graph[@]}"; do
+            if ((g < last)); then
+                out+=("        ${graph[g]};")
+            else
+                out+=("        ${graph[g]}")
+            fi
+        done
+        out+=("    '")
+        maps+=" -map '[aout]'"
+    fi
+
+    # The re-encoded pieces carry their own parameter sets in-band; hvc1 would strip them.
+    venc="-c:v copy"
+    [[ "${codec}" == "libx265" ]] && ((mp4_like == 1)) && venc+=" -tag:v hev1"
+    out+=("    ${maps} ${venc}")
+    if ((use_audio != 0)); then
+        if [[ "${audio_bitrate}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+            q_abit="${audio_bitrate}"
+        else
+            q_abit="'${audio_bitrate//\'/\'\\\'\'}'"
+        fi
+        out+=("    -c:a aac -b:a ${q_abit}")
+    fi
+    ((mp4_like == 1)) && out+=("    ${ext_args[*]}")
+else
+    out+=("ffmpeg -hide_banner -loglevel error -stats -y")
+    for path in "${clips[@]}"; do
+        if [[ "${path}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+            q_path="${path}"
+        else
+            q_path="'${path//\'/\'\\\'\'}'"
+        fi
+        out+=("    -i ${q_path}")
+    done
+
+    graph=()
+    fmt='aformat=sample_fmts=fltp:channel_layouts=stereo'
+    n=${#clips[@]}
+    for ((i = 0; i < n; i++)); do
+        label="v${i}"
+        ((n == 1)) && label='vout'
+        graph+=("[$i:v:0]setpts=PTS-STARTPTS,scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${rate},format=yuv420p,settb=AVTB[${label}]")
+    done
+    if ((use_audio != 0)); then
+        for ((i = 0; i < n; i++)); do
+            label="a${i}"
+            ((n == 1)) && label='aout'
+            len="${clip_len[i]}"
+            if ((clip_audio[i] != 0)); then
+                graph+=("[$i:a:0]asetpts=PTS-STARTPTS,aresample=${audio_rate},${fmt},apad=whole_dur=${len},atrim=duration=${len}[${label}]")
+            else
+                graph+=("anullsrc=r=${audio_rate}:cl=stereo,${fmt},atrim=duration=${len}[${label}]")
+            fi
+        done
+    fi
+
+    cur_v='v0'
+    cur_a='a0'
+    for step in "${steps[@]}"; do
+        IFS=$'\t' read -r k kind tname tdur offset <<<"${step}"
+        if ((k == n - 1)); then
+            out_v='vout'
+            out_a='aout'
+        else
+            out_v="x${k}"
+            out_a="y${k}"
+        fi
+        if [[ "${kind}" == "xfade" ]]; then
+            graph+=("[${cur_v}][v${k}]xfade=transition=${tname}:duration=${tdur}:offset=${offset}[${out_v}]")
+            ((use_audio != 0)) && graph+=("[${cur_a}][a${k}]acrossfade=d=${tdur}[${out_a}]")
+        else
+            if ((use_audio != 0)); then
+                graph+=("[${cur_v}][${cur_a}][v${k}][a${k}]concat=n=2:v=1:a=1[c${k}][${out_a}]")
+            else
+                graph+=("[${cur_v}][v${k}]concat=n=2:v=1:a=0[c${k}]")
+            fi
+            graph+=("[c${k}]settb=AVTB[${out_v}]")
+        fi
+        cur_v="${out_v}"
+        cur_a="${out_a}"
+    done
+
+    out+=("    -filter_complex '")
+    last=$((${#graph[@]} - 1))
+    for g in "${!graph[@]}"; do
+        if ((g < last)); then
+            out+=("        ${graph[g]};")
+        else
+            out+=("        ${graph[g]}")
+        fi
+    done
+    out+=("    '")
+
+    maps="-map '[vout]'"
+    ((use_audio != 0)) && maps+=" -map '[aout]'"
+    out+=("    ${maps}")
+
+    if [[ "${codec}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+        q_codec="${codec}"
+    else
+        q_codec="'${codec//\'/\'\\\'\'}'"
+    fi
+    if [[ "${crf}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+        q_crf="${crf}"
+    else
+        q_crf="'${crf//\'/\'\\\'\'}'"
+    fi
+    if [[ "${preset}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+        q_preset="${preset}"
+    else
+        q_preset="'${preset//\'/\'\\\'\'}'"
+    fi
+    venc="-c:v ${q_codec} -crf ${q_crf} -preset ${q_preset}"
+    if [[ "${codec}" == "libx265" ]]; then
+        venc+=" -x265-params log-level=error"
+        ((mp4_like == 1)) && venc+=" -tag:v hvc1"
+    fi
+    out+=("    ${venc}")
+    if ((use_audio != 0)); then
+        if [[ "${audio_bitrate}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+            q_abit="${audio_bitrate}"
+        else
+            q_abit="'${audio_bitrate//\'/\'\\\'\'}'"
+        fi
+        out+=("    -c:a aac -b:a ${q_abit}")
+    fi
+    ((mp4_like == 1)) && out+=("    ${ext_args[*]}")
+fi
+
+if [[ "${temp}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+    q_temp="${temp}"
+else
+    q_temp="'${temp//\'/\'\\\'\'}'"
+fi
+if [[ "${output}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+    q_output="${output}"
+else
+    q_output="'${output//\'/\'\\\'\'}'"
+fi
+
+out+=("    -- ${q_temp}")
+if ((hybrid == 1)); then
+    out+=("&& mv -f -- ${q_temp} ${q_output}")
+    out+=("&& rm -rf -- \"\$tmp\"")
+    out+=("|| { rm -f -- ${q_temp}; [[ -z \"\$tmp\" ]] || rm -rf -- \"\$tmp\"; false; }")
+else
+    out+=("&& mv -f -- ${q_temp} ${q_output}")
+    out+=("|| { rm -f -- ${q_temp}; false; }")
+fi
+
+if [[ "${spec}" =~ ^[A-Za-z0-9_./:=+,@%^-]+$ ]]; then
+    q_spec="${spec}"
+else
+    q_spec="'${spec//\'/\'\\\'\'}'"
+fi
+printf '# %s %s\n' "${self_name}" "${q_spec}"
+
+in_graph=0
+for idx in "${!out[@]}"; do
+    line="${out[idx]}"
+    if ((idx == ${#out[@]} - 1)); then
+        printf '%s\n' "${line}"
+    elif [[ "${line}" == "    -filter_complex '" ]]; then
+        printf '%s\n' "${line}"
+        in_graph=1
+    elif ((in_graph == 1)) && [[ "${line}" == "    '" ]]; then
+        printf '%s \\\n' "${line}"
+        in_graph=0
+    elif ((in_graph == 1)); then
+        printf '%s\n' "${line}"
+    else
+        printf '%s \\\n' "${line}"
+    fi
+done
+
+exit 0

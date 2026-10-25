@@ -1,0 +1,8 @@
+{
+  "output": "dissolve.mp4",
+  "sequence": [
+    "../clips/a.mp4",
+    "dissolve",
+    "../clips/b.mp4"
+  ]
+}
